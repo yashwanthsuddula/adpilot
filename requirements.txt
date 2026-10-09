@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+streamlit
+requests
+ollama
+pydantic
+chromadb
+mcp
+strands-agents
+boto3
+streamlit-mic-recorder
