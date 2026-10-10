@@ -425,6 +425,7 @@ def show_optimization_card():
 # ============================================================
 
 def apply_pending_optimization():
+    """Apply the pending optimization and verify it against campaign data."""
     p = st.session_state.pending_optimization
 
     if not p:
@@ -446,25 +447,90 @@ def apply_pending_optimization():
         speak(msg)
         return False
 
-    st.session_state.pending_optimization = None
+    # A protocol/tool error must not be reported as success.
+    if getattr(result, "isError", False):
+        texts = result_texts(result)
+        msg = texts[0] if texts else "The optimization tool reported an error."
+        st.error(f"⚠️ {msg}")
+        speak(msg)
+        return False
 
     items = json_items(result)
+    if not items or not isinstance(items[0], dict):
+        texts = result_texts(result)
+        msg = texts[0] if texts else "Could not verify the optimization result."
+        st.error(f"⚠️ {msg}")
+        speak(msg)
+        return False
 
-    if items:
-        st.success(
-            f"✅ Change applied: {items[0]}"
+    outcome = items[0]
+    if outcome.get("status") in ("error", "needs_confirmation"):
+        msg = outcome.get("message", "The optimization was not applied.")
+        st.error(f"⚠️ {msg}")
+        speak(msg)
+        return False
+
+    # Verify against the source-of-truth campaign API before claiming success.
+    try:
+        report = mcp_call("campaign_report")
+    except MCPConnectionError as err:
+        msg = (
+            "The tool returned a response, but I could not verify the campaign "
+            f"state: {err}"
         )
+        st.error(msg)
+        speak(msg)
+        return False
+
+    ads = json_items(report)
+    ad_id = p.get("ad_id")
+    updated_ad = next(
+        (ad for ad in ads if isinstance(ad, dict) and ad.get("id") == ad_id),
+        None,
+    )
+    if updated_ad is None:
+        msg = f"Could not find Ad {ad_id} in the latest campaign report."
+        st.error(msg)
+        speak(msg)
+        return False
+
+    if p.get("action") == "boost":
+        try:
+            expected_budget = float(p["budget"])
+            actual_budget = float(updated_ad["budget"])
+        except (KeyError, TypeError, ValueError):
+            msg = "The updated budget could not be verified."
+            st.error(msg)
+            speak(msg)
+            return False
+
+        if abs(actual_budget - expected_budget) > 0.01:
+            msg = (
+                f"Budget change not verified: expected ${expected_budget:.2f}, "
+                f"but the campaign API reports ${actual_budget:.2f}."
+            )
+            st.error(msg)
+            speak(msg)
+            return False
+        success_message = f"Verified: Ad {ad_id} budget is now ${actual_budget:.2f}."
+
+    elif p.get("action") == "pause":
+        if updated_ad.get("status") != "paused":
+            msg = f"Pause not verified: Ad {ad_id} is still {updated_ad.get('status', 'in an unknown status')}."
+            st.error(msg)
+            speak(msg)
+            return False
+        success_message = f"Verified: Ad {ad_id} is paused."
 
     else:
-        text = result_texts(result)
+        msg = "Unsupported optimization action; no success was reported."
+        st.error(msg)
+        speak(msg)
+        return False
 
-        st.success(
-            text[0]
-            if text
-            else "✅ Change applied."
-        )
-
-    speak("The approved change has been applied.")
+    st.session_state.pending_optimization = None
+    st.success(success_message)
+    speak(success_message)
     return True
 
 
@@ -830,7 +896,3 @@ if user_text:
             "content": reply,
         }
     )
-
-    # Don't force a rerun here.
-    # This allows the optimization card to render
-    # immediately after an optimization request.
